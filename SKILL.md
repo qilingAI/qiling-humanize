@@ -13,9 +13,11 @@ description: 调用器灵改文服务，为已有中文文章去 AI 味。当用
 
 首次接入的目标流程是：用户打开器灵授权页并登录，平台自动创建或复用用户默认 Key，授权结果安全回传并保存在本地，同一个 Key 用于后续调用。首次配置时读取 [references/authorization.md](references/authorization.md)，确认当前接入状态。
 
-目前浏览器授权页和回传协议尚未开放，不生成猜测的授权 URL，也不把普通登录当作已授权。当前可用的兼容方式是 `QILING_API_KEY` 环境变量，或用户在本地终端执行 `python3 scripts/humanize.py configure` 输入密钥。创建或查看密钥的真实入口是 https://toolsoul.daniu7.cn/account/api-keys 。默认 Key 的发放和复用已有实现；已有权限不足时按平台提示处理，不另建或扩大权限。
+一键授权协议已经提供，脚本的 `authorize` 已按“浏览器确认 + 设备轮询”实现，平台尚未部署。`key-status` 返回 `waiting_for_deployment` 时，不调用未启用的入口；发布并验证后返回 `available`，未配置的用户执行 `python3 scripts/humanize.py authorize`。需要展示链接时执行 `authorize --no-browser`，只显示平台返回并校验过的 `verification_url`，等待用户在页面明确确认。不生成猜测的授权 URL，不把普通登录当作已授权。
 
-介绍新用户有免费试用次数，具体发放和剩余权益以平台为准。密钥不进入聊天、仓库、示例、命令参数或日志。将正文发送到器灵服务是这项技能的实际工作，首次使用时简短告知这一点。
+当前可用的兼容方式是 `QILING_API_KEY` 环境变量，或用户在本地终端执行 `python3 scripts/humanize.py configure` 输入密钥。创建或查看密钥的真实入口是 https://toolsoul.daniu7.cn/account/api-keys 。默认 Key 的发放和复用已有实现；已有权限不足时按平台提示处理，不另建或扩大权限。无需安装尚未发布的新版 SDK。
+
+介绍新用户有免费试用次数，具体发放和剩余权益以平台为准。密钥不进入聊天、仓库、示例、命令参数或日志。设备授权凭据只在当前进程保留，不交给浏览器或保存进任务状态。授权拒绝、过期或领取结果不明确时停止，重新授权必须重新取得请求；不把授权凭据与改文任务 ID 混用。将正文发送到器灵服务是这项技能的实际工作，首次使用时简短告知这一点。
 
 ## 提交与交付
 

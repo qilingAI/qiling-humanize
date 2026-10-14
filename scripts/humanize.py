@@ -13,13 +13,16 @@ import re
 import sys
 import tempfile
 import time
+import webbrowser
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 BASE_URL = "https://toolsoul.daniu7.cn"
 MAX_CHARS = 2000
 KEY_FILE = Path.home() / ".config/qiling-humanize/credentials.json"
+# 平台协议已实现但未部署；线上联调完成后再打开默认入口。
+AUTHORIZATION_ENABLED = False
 
 
 class ClientError(Exception):
@@ -51,7 +54,7 @@ def load_key():
         if os.name == "posix" and KEY_FILE.stat().st_mode & 0o077:
             raise ClientError("本地凭据文件权限过宽，请先设置为 600。")
         return validate_key(read_json(KEY_FILE).get("api_key")), "local"
-    raise ClientError("尚未配置器灵 API Key。一键授权待接入；当前可在本地终端执行 configure。")
+    raise ClientError("尚未配置器灵 API Key。一键授权已按协议接入、等待平台部署；当前可在本地终端执行 configure。")
 
 
 def write_private(path, text):
@@ -140,13 +143,14 @@ def split_text(text, limit=MAX_CHARS):
     return parts
 
 
-def request(method, path, key, payload=None):
+def request(method, path, key=None, payload=None, timeout=60):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
-    req = Request(BASE_URL + path, data=body, method=method, headers={
-        "x-api-key": key, "Content-Type": "application/json",
-    })
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["x-api-key"] = key
+    req = Request(BASE_URL + path, data=body, method=method, headers=headers)
     try:
-        with build_opener(NoRedirect).open(req, timeout=60) as response:
+        with build_opener(NoRedirect).open(req, timeout=timeout) as response:
             data = json.load(response)
     except HTTPError as error:
         try:
@@ -159,7 +163,10 @@ def request(method, path, key, payload=None):
             retry_after = max(3, int(error.headers.get("Retry-After", "3")))
         except (ValueError, TypeError):
             retry_after = 3
-        raise RemoteError(message.replace(key, "[密钥已隐藏]")[:800], error.code, retry_after) from None
+        for secret in (key, payload.get("device_code") if isinstance(payload, dict) else None):
+            if secret:
+                message = message.replace(secret, "[凭据已隐藏]")
+        raise RemoteError(message[:800], error.code, retry_after) from None
     except (URLError, TimeoutError, OSError, HTTPException):
         raise RemoteError("网络中断或请求超时。") from None
     except (ValueError, UnicodeError):
@@ -167,6 +174,75 @@ def request(method, path, key, payload=None):
     if not isinstance(data, dict):
         raise RemoteError("服务响应应为 JSON 对象。")
     return data
+
+
+def authorize(open_browser=True, on_authorization_url=None):
+    if not AUTHORIZATION_ENABLED:
+        raise ClientError("一键授权已按正式协议接入，等待平台部署与线上验证，当前入口尚未启用。可先使用 configure 或 QILING_API_KEY。")
+    try:
+        started_at = time.monotonic()
+        authorization = request("POST", "/api/v1/auth/api-key/requests", payload={"client_name": "文章去 AI 味 Skill"})
+        device_code = authorization.get("device_code")
+        verification_url = authorization.get("verification_url")
+        expires_in, interval = authorization.get("expires_in"), authorization.get("interval")
+        if not isinstance(device_code, str) or not 1 <= len(device_code) <= 1024:
+            raise ClientError("授权响应缺少有效设备凭据，请重新发起授权。")
+        if not isinstance(verification_url, str):
+            raise ClientError("授权响应缺少确认页面，请重新发起授权。")
+        url = urlsplit(verification_url)
+        if (url.scheme != "https" or url.netloc != urlsplit(BASE_URL).netloc
+                or url.path != "/account/api-authorize" or url.fragment
+                or not parse_qs(url.query).get("request") or device_code in unquote(verification_url)):
+            raise ClientError("授权确认地址不符合器灵协议，已停止。")
+        if (type(expires_in) is not int or expires_in <= 0
+                or type(interval) is not int or interval <= 0):
+            raise ClientError("授权响应的有效期或查询间隔无效。")
+        deadline = started_at + min(expires_in, 600)
+        interval = max(interval, 3)
+        if on_authorization_url:
+            on_authorization_url(verification_url)
+        if open_browser:
+            try:
+                opened = webbrowser.open(verification_url)
+            except webbrowser.Error:
+                opened = False
+            if not opened and not on_authorization_url:
+                raise ClientError("无法自动打开浏览器，请使用 authorize --no-browser 显示授权链接。")
+        elif not on_authorization_url:
+            raise ClientError("未提供展示授权链接的方式。")
+        while time.monotonic() < deadline:
+            time.sleep(min(interval, max(0, deadline - time.monotonic())))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                result = request("POST", "/api/v1/auth/api-key/token", payload={"device_code": device_code}, timeout=min(60, remaining))
+            except RemoteError as error:
+                if error.status == 429:
+                    interval = max(interval, error.retry_after)
+                    continue
+                raise
+            status = result.get("status")
+            if status == "pending":
+                continue
+            if status == "denied":
+                raise ClientError("用户已拒绝授权，未保存密钥。")
+            if status == "consumed":
+                raise ClientError("该授权已经领取，不能再次领取；请重新发起授权。")
+            if status != "authorized":
+                raise ClientError("收到未知授权状态，已停止；请重新发起授权。")
+            if result.get("base_url") != BASE_URL or result.get("app_key") != "":
+                raise ClientError("授权结果的服务地址或应用类型不符合当前 Skill 请求，未保存密钥。")
+            save_key(result.get("api_key"))
+            return {"configured": True, "source": "local", "authorization": "authorized"}
+    except RemoteError as error:
+        if error.status == 410:
+            raise ClientError("授权已过期，请重新发起授权。") from None
+        if error.status in (404, 503):
+            raise ClientError("平台授权服务暂不可用，请确认平台已经部署并启用一键授权。") from None
+        # 领取成功后响应丢失不能再次领取；不输出服务返回的凭据或原始错误。
+        raise ClientError("授权请求未完成或领取结果不明确，请重新发起授权。默认 Key 已停用、删除或重置时，请先在平台处理。") from None
+    raise ClientError("授权等待超时，请重新发起授权。")
 
 
 def wait_for_part(part, state, state_path, key, deadline):
@@ -290,10 +366,12 @@ def repair_part_locked(state_path, number, task_id, confirmed):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="器灵文章去 AI 味；一键授权待接入，当前支持本地密钥配置。")
+    parser = argparse.ArgumentParser(description="器灵文章去 AI 味；一键授权已接入待部署，兼容本地密钥配置。")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("key-status", help="检查是否配置，不输出密钥")
     commands.add_parser("configure", help="在本地交互终端私下输入 API Key")
+    authorization_parser = commands.add_parser("authorize", help="平台部署后打开器灵确认页，安全领取默认 API Key")
+    authorization_parser.add_argument("--no-browser", action="store_true", help="仅显示确认链接，不自动打开浏览器")
     for name in ("plan", "rewrite"):
         sub = commands.add_parser(name)
         sub.add_argument("--input", required=True, help="UTF-8 文本文件；- 表示标准输入")
@@ -313,11 +391,20 @@ def main():
     active_key = None
     try:
         if args.command == "key-status":
+            authorization_status = "available" if AUTHORIZATION_ENABLED else "waiting_for_deployment"
             if not os.environ.get("QILING_API_KEY") and not KEY_FILE.exists():
-                result = {"configured": False, "one_click_authorization": "pending"}
+                result = {"configured": False, "one_click_authorization": authorization_status}
             else:
                 _, source = load_key()
-                result = {"configured": True, "source": source, "one_click_authorization": "pending"}
+                result = {"configured": True, "source": source, "one_click_authorization": authorization_status}
+        elif args.command == "authorize":
+            if os.environ.get("QILING_API_KEY") or KEY_FILE.exists():
+                _, source = load_key()
+                result = {"configured": True, "source": source, "authorization": "reused"}
+            else:
+                def show_url(url):
+                    print(json.dumps({"verification_url": url, "message": "请在器灵页面登录并明确确认授权；此进程将等待结果。"}, ensure_ascii=False), flush=True)
+                result = authorize(open_browser=not args.no_browser, on_authorization_url=show_url)
         elif args.command == "configure":
             if not sys.stdin.isatty():
                 raise ClientError("请在本地交互终端运行 configure；不要通过聊天或命令参数传递密钥。")
