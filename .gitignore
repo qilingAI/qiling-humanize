@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.env
+.env.*
+credentials.json
+*.qiling-state.json*
+.DS_Store

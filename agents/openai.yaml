@@ -1,0 +1,4 @@
+interface:
+  display_name: "文章去AI味 · 器灵"
+  short_description: "调用器灵专业改文服务处理中文文章，支持免费试用与本地文件改写"
+  default_prompt: "使用 $qiling-humanize 为这篇文章去 AI 味，调用器灵服务并交付完整成稿。"
