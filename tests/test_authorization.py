@@ -19,7 +19,7 @@ class AuthorizationTests(unittest.TestCase):
         self.key_path = Path(self.directory.name) / "config/credentials.json"
         self.now = 0
         for target, name, value in (
-            (client, "KEY_FILE", self.key_path), (client, "AUTHORIZATION_ENABLED", True),
+            (client, "KEY_FILE", self.key_path),
             (client.time, "monotonic", lambda: self.now), (client.time, "sleep", self.sleep),
         ):
             mock = patch.object(target, name, value)
@@ -50,11 +50,15 @@ class AuthorizationTests(unittest.TestCase):
         if os.name == "posix":
             self.assertEqual(self.key_path.stat().st_mode & 0o777, 0o600)
 
-    def test_disabled_rollout_makes_no_network_requests(self):
-        with patch.object(client, "AUTHORIZATION_ENABLED", False), patch.object(client, "request") as request:
-            with self.assertRaisesRegex(client.ClientError, "等待平台部署"):
-                client.authorize()
-            request.assert_not_called()
+    def test_cli_authorization_is_enabled_and_never_prints_secrets(self):
+        out = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True), patch.object(client, "request", side_effect=[self.creation, self.success]), patch.object(client.sys, "argv", ["humanize", "authorize", "--no-browser"]), patch.object(client.sys, "stdout", out):
+            self.assertEqual(client.main(), 0)
+        messages = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(messages[0]["verification_url"], VERIFY)
+        self.assertTrue(messages[1]["configured"])
+        self.assertNotIn(KEY, out.getvalue())
+        self.assertNotIn(DEVICE, out.getvalue())
 
     def test_no_browser_shows_only_confirmation_link(self):
         shown = []
@@ -117,10 +121,10 @@ class AuthorizationTests(unittest.TestCase):
                     client.authorize(open_browser=False, on_authorization_url=lambda url: None)
                 self.assertFalse(self.key_path.exists())
 
-    def test_cli_reuses_existing_key_even_before_deployment(self):
+    def test_cli_reuses_existing_key_without_new_authorization(self):
         client.save_key(KEY)
         out = io.StringIO()
-        with patch.object(client, "AUTHORIZATION_ENABLED", False), patch.dict(os.environ, {}, clear=True), patch.object(client, "request") as request, patch.object(client.sys, "argv", ["humanize", "authorize"]), patch.object(client.sys, "stdout", out):
+        with patch.dict(os.environ, {}, clear=True), patch.object(client, "request") as request, patch.object(client.sys, "argv", ["humanize", "authorize"]), patch.object(client.sys, "stdout", out):
             self.assertEqual(client.main(), 0)
         request.assert_not_called()
         self.assertEqual(json.loads(out.getvalue())["authorization"], "reused")

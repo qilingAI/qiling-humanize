@@ -21,8 +21,6 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 BASE_URL = "https://toolsoul.daniu7.cn"
 MAX_CHARS = 2000
 KEY_FILE = Path.home() / ".config/qiling-humanize/credentials.json"
-# 平台协议已实现但未部署；线上联调完成后再打开默认入口。
-AUTHORIZATION_ENABLED = False
 
 
 class ClientError(Exception):
@@ -54,7 +52,7 @@ def load_key():
         if os.name == "posix" and KEY_FILE.stat().st_mode & 0o077:
             raise ClientError("本地凭据文件权限过宽，请先设置为 600。")
         return validate_key(read_json(KEY_FILE).get("api_key")), "local"
-    raise ClientError("尚未配置器灵 API Key。一键授权已按协议接入、等待平台部署；当前可在本地终端执行 configure。")
+    raise ClientError("尚未配置器灵 API Key。请运行 authorize 完成一键授权；也支持 configure 或 QILING_API_KEY。")
 
 
 def write_private(path, text):
@@ -177,8 +175,6 @@ def request(method, path, key=None, payload=None, timeout=60):
 
 
 def authorize(open_browser=True, on_authorization_url=None):
-    if not AUTHORIZATION_ENABLED:
-        raise ClientError("一键授权已按正式协议接入，等待平台部署与线上验证，当前入口尚未启用。可先使用 configure 或 QILING_API_KEY。")
     try:
         started_at = time.monotonic()
         authorization = request("POST", "/api/v1/auth/api-key/requests", payload={"client_name": "文章去 AI 味 Skill"})
@@ -239,7 +235,7 @@ def authorize(open_browser=True, on_authorization_url=None):
         if error.status == 410:
             raise ClientError("授权已过期，请重新发起授权。") from None
         if error.status in (404, 503):
-            raise ClientError("平台授权服务暂不可用，请确认平台已经部署并启用一键授权。") from None
+            raise ClientError("平台授权服务暂不可用，请稍后重新授权；也可使用 configure 或 QILING_API_KEY。") from None
         # 领取成功后响应丢失不能再次领取；不输出服务返回的凭据或原始错误。
         raise ClientError("授权请求未完成或领取结果不明确，请重新发起授权。默认 Key 已停用、删除或重置时，请先在平台处理。") from None
     raise ClientError("授权等待超时，请重新发起授权。")
@@ -366,11 +362,11 @@ def repair_part_locked(state_path, number, task_id, confirmed):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="器灵文章去 AI 味；一键授权已接入待部署，兼容本地密钥配置。")
+    parser = argparse.ArgumentParser(description="器灵文章去 AI 味；支持浏览器一键授权和本地密钥配置。")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("key-status", help="检查是否配置，不输出密钥")
     commands.add_parser("configure", help="在本地交互终端私下输入 API Key")
-    authorization_parser = commands.add_parser("authorize", help="平台部署后打开器灵确认页，安全领取默认 API Key")
+    authorization_parser = commands.add_parser("authorize", help="打开器灵确认页，安全领取默认 API Key")
     authorization_parser.add_argument("--no-browser", action="store_true", help="仅显示确认链接，不自动打开浏览器")
     for name in ("plan", "rewrite"):
         sub = commands.add_parser(name)
@@ -391,12 +387,11 @@ def main():
     active_key = None
     try:
         if args.command == "key-status":
-            authorization_status = "available" if AUTHORIZATION_ENABLED else "waiting_for_deployment"
             if not os.environ.get("QILING_API_KEY") and not KEY_FILE.exists():
-                result = {"configured": False, "one_click_authorization": authorization_status}
+                result = {"configured": False, "one_click_authorization": "available"}
             else:
                 _, source = load_key()
-                result = {"configured": True, "source": source, "one_click_authorization": authorization_status}
+                result = {"configured": True, "source": source, "one_click_authorization": "available"}
         elif args.command == "authorize":
             if os.environ.get("QILING_API_KEY") or KEY_FILE.exists():
                 _, source = load_key()

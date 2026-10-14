@@ -55,13 +55,13 @@ npx skills add qilingAI/qiling-humanize --skill qiling-humanize
 
 技能文件使用标准 `SKILL.md`，调用脚本只依赖 Python 3 标准库。
 
-### 一键授权：已按协议接入，等待平台部署
+### 一键授权
 
 使用流程是 **打开器灵授权页并登录 → 明确确认授权 → 自动领取默认 API Key 并保存到本地 → 开始改文**。
 
-平台默认 Key 的创建与复用已有实现，浏览器确认与设备轮询协议也已提供。Skill 已实现领取和保存；新增平台接口尚未部署，当前入口保持关闭，等待部署及线上验证。[查看授权协议和发布状态](references/authorization.md)。
+新用户自动创建默认 API Key，已有用户复用默认 Key；Skill 自动领取并保存在本地。[查看授权协议](references/authorization.md)。
 
-正式启用后，在技能目录执行：
+在技能目录执行：
 
 ```sh
 python3 scripts/humanize.py authorize
@@ -69,7 +69,7 @@ python3 scripts/humanize.py authorize
 
 没有自动浏览器的环境使用 `authorize --no-browser`，按显示的链接登录确认，保持原进程运行即可。已有本地密钥会直接复用。无需在聊天中粘贴密钥，无需启动本地回调服务器。
 
-### 当前可用的兼容配置
+### 手动配置（备用）
 
 登录[器灵 API Key 页面](https://toolsoul.daniu7.cn/account/api-keys)，查看已有默认 Key；在自己的本地交互终端、技能目录下执行：
 
