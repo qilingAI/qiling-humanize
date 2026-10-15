@@ -60,7 +60,7 @@ def write_private(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".qiling-", dir=path.parent)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
@@ -121,24 +121,36 @@ def save_key(key):
     write_json(KEY_FILE, {"api_key": key})
 
 
-def split_text(text, limit=MAX_CHARS):
-    text = text.strip()
-    if not text:
+def split_text(text, limit=MAX_CHARS, *, legacy=False):
+    if legacy:
+        text = text.strip()
+    if not text.strip():
         raise ClientError("正文不能为空。")
     parts = []
     while len(text) > limit:
         cut = limit
-        for separator in ("\n\n", "\n", "。", "！", "？", ". ", "! ", "? ", "；", "; "):
+        separators = ("\n\n", "\n", "。", "！", "？", ". ", "! ", "? ", "；", "; ") if legacy else ("\r\n\r\n", "\n\n", "\r\r", "\r\n", "\n", "\r", "。", "！", "？", ". ", "! ", "? ", "；", "; ")
+        for separator in separators:
             position = text.rfind(separator, 0, limit)
             if position >= limit // 2:
                 cut = position + len(separator)
                 break
+        if not legacy and not text[cut:].strip():
+            cut = min(cut, len(text.rstrip()) - 1)
+        if not legacy and text[cut - 1:cut + 1] == "\r\n":
+            cut -= 1
         part, text = text[:cut], text[cut:]
         if not part.strip():
             raise ClientError("正文含有超过字符上限的连续空白，请先整理该空白段。")
         parts.append(part)
+    if not text.strip():
+        raise ClientError("正文包含无法单独提交的纯空白分段，请先整理该空白段。")
     parts.append(text)
     return parts
+
+
+def line_break_count(text):
+    return text.count("\n") + text.count("\r") - text.count("\r\n")
 
 
 def request(method, path, key=None, payload=None, timeout=60):
@@ -275,21 +287,33 @@ def rewrite(text, output, state_path, key, wait_seconds=600):
 
 
 def rewrite_locked(text, output, state_path, key, wait_seconds):
-    chunks = split_text(text)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     output, state_path = Path(output), Path(state_path)
     if output.resolve() == state_path.resolve():
         raise ClientError("成稿路径和任务状态路径必须不同。")
     if state_path.exists():
         state = read_json(state_path)
+        if "text_format" not in state and state.get("input_sha256") != digest:
+            original_read = text.replace("\r\n", "\n").replace("\r", "\n")
+            original_digest = hashlib.sha256(original_read.encode("utf-8")).hexdigest()
+            if state.get("input_sha256") == original_digest:
+                text, digest = original_read, original_digest
         if state.get("input_sha256") != digest or state.get("output") != str(output.resolve()) or state.get("base_url") != BASE_URL:
             raise ClientError("任务状态不属于当前原文或输出路径，请使用原任务的输入和输出。")
+        # 已提交的旧任务沿用原分段，避免升级后移位、漏文或重复收费。
+        if "text_format" not in state:
+            chunks = split_text(text, legacy=True)
+        elif state["text_format"] != "verbatim-v1":
+            raise ClientError("不支持此任务状态的文本格式，请使用创建该任务的客户端恢复。")
+        else:
+            chunks = split_text(text)
         if not isinstance(state.get("parts"), list) or len(state["parts"]) != len(chunks):
             raise ClientError("任务状态文件格式不正确。")
     else:
+        chunks = split_text(text)
         if output.exists():
             raise ClientError("成稿路径已有文件，请选择新的输出路径。")
-        state = {"base_url": BASE_URL, "input_sha256": digest, "output": str(output.resolve()),
+        state = {"base_url": BASE_URL, "input_sha256": digest, "output": str(output.resolve()), "text_format": "verbatim-v1",
                  "parts": [{"status": "ready"} for _ in chunks]}
         write_json(state_path, state)
     deadline = time.monotonic() + wait_seconds
@@ -329,9 +353,14 @@ def rewrite_locked(text, output, state_path, key, wait_seconds):
         if not isinstance(part["task_id"], str):
             raise ClientError("任务 ID 格式不正确。")
         wait_for_part(part, state, state_path, key, deadline)
-    finished = "\n\n".join(part["text"].strip() for part in state["parts"]) + "\n"
-    if output.exists() and output.read_text(encoding="utf-8") != finished:
-        raise ClientError("成稿路径已有不同内容，请保留该文件并从任务状态另存结果。")
+    if "text_format" not in state:
+        finished = "\n\n".join(part["text"].strip() for part in state["parts"]) + "\n"
+    else:
+        finished = "\n\n".join(part["text"] for part in state["parts"])
+    if output.exists():
+        existing = output.read_text(encoding="utf-8") if "text_format" not in state else output.read_bytes().decode("utf-8")
+        if existing != finished:
+            raise ClientError("成稿路径已有不同内容，请保留该文件并从任务状态另存结果。")
     write_private(output, finished)
     return {"status": "completed", "output": str(output.resolve()), "state": str(state_path.resolve()),
             "calls": len(chunks), "receipts": [{field: part[field] for field in ("task_id", "charged", "balance") if field in part} for part in state["parts"]]}
@@ -409,10 +438,15 @@ def main():
             repair_part(args.state, args.part, getattr(args, "task_id", None), getattr(args, "confirmed_not_created", False))
             result = {"status": "ready_to_resume", "state": args.state, "part": args.part}
         else:
-            text = sys.stdin.read() if args.input == "-" else Path(args.input).read_text(encoding="utf-8-sig")
-            parts = split_text(text)
+            if args.input == "-":
+                text = sys.stdin.buffer.read().decode("utf-8-sig") if hasattr(sys.stdin, "buffer") else sys.stdin.read()
+            else:
+                text = Path(args.input).read_bytes().decode("utf-8-sig")
             if args.command == "plan":
-                result = {"characters": len(text.strip()), "calls": len(parts), "part_characters": [len(part) for part in parts], "max_input_characters": MAX_CHARS}
+                parts = split_text(text)
+                result = {"characters": len(text), "line_breaks": line_break_count(text), "calls": len(parts),
+                          "part_characters": [len(part) for part in parts], "part_line_breaks": [line_break_count(part) for part in parts],
+                          "max_input_characters": MAX_CHARS}
             else:
                 if args.wait_seconds <= 0:
                     raise ClientError("等待时间必须大于 0。")

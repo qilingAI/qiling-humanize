@@ -23,7 +23,7 @@ class HumanizeTests(unittest.TestCase):
         self.state = self.root / "finished.md.qiling-state.json"
 
     def test_split_keeps_all_content_and_stays_inside_api_limit(self):
-        text = "读" * 1200 + "。\n\n" + "书" * 1500 + "！" + "🦊" * 1100
+        text = "\n\t" + "读" * 1200 + "。\n\n" + "书" * 1500 + "！" + "🦊" * 1100 + "\n\n"
         parts = client.split_text(text)
         self.assertEqual("".join(parts), text)
         self.assertTrue(all(0 < len(part) <= 2000 for part in parts))
@@ -46,7 +46,7 @@ class HumanizeTests(unittest.TestCase):
         with patch.object(client, "request", side_effect=service):
             result = client.rewrite("原文", self.output, self.state, KEY)
         self.assertEqual(calls, ["POST", "GET"])
-        self.assertEqual(self.output.read_text(), "改文\n")
+        self.assertEqual(self.output.read_text(), "改文")
         self.assertEqual(result["receipts"][0]["charged"], "0.00")
 
     def test_unknown_submission_cannot_be_automatically_resubmitted(self):
@@ -87,7 +87,7 @@ class HumanizeTests(unittest.TestCase):
         self.assertEqual(len(posts), 2)
         self.assertEqual(request.call_count, 1)
         self.assertEqual(request.call_args.args[0], "GET")
-        self.assertEqual(self.output.read_text(), "第一段改文\n\n第二段改文\n")
+        self.assertEqual(self.output.read_text(), "第一段改文\n\n第二段改文")
 
     def test_failed_task_does_not_trigger_another_paid_post(self):
         with patch.object(client, "request", side_effect=[{"task_id": "failed-task"}, {"status": "failed", "error_code": "UPSTREAM_ERROR", "message": "失败"}]):
@@ -189,6 +189,103 @@ class HumanizeTests(unittest.TestCase):
             opener.return_value.open.side_effect = IncompleteRead(b"partial")
             with self.assertRaises(client.RemoteError):
                 client.request("POST", "/api/v1/open/remove-ai", KEY, {"text": "原文"})
+
+    def test_split_keeps_crlf_together_at_character_limit(self):
+        text = "甲" * 1999 + "\r\n" + "乙" * 1999 + "\r\n"
+        parts = client.split_text(text)
+        self.assertEqual("".join(parts), text)
+        self.assertTrue(all(0 < len(part) <= 2000 for part in parts))
+        self.assertTrue(all(not part.endswith("\r") for part in parts))
+        self.assertEqual(sum(client.line_break_count(part) for part in parts), 2)
+
+    def test_cli_preserves_newlines_from_file_or_stdin_through_json_and_output(self):
+        for source in ("file", "stdin"):
+            for newline in ("\n", "\r\n", "\r"):
+                with self.subTest(source=source, newline=repr(newline)):
+                    text = newline + "  第一段第一行" + newline + "第二行" + newline * 3 + "\t第二段，保留字面量 \\n 和 🦊。" + newline * 2
+                    rewritten = newline * 2 + "  服务返回第一段" + newline * 3 + "第二段。" + newline * 2
+                    original = self.root / (source + str(len(newline)) + "-" + str(ord(newline[-1])) + ".txt")
+                    original.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
+                    output = original.with_suffix(".out.md")
+                    sent = []
+
+                    def service(req, **kwargs):
+                        if req.method == "POST":
+                            sent.append(json.loads(req.data.decode("utf-8"))["text"])
+                            return io.BytesIO(b'{"task_id":"newline-task"}')
+                        return io.BytesIO(json.dumps({"status": "completed", "text": rewritten}, ensure_ascii=False).encode("utf-8"))
+
+                    stdin = io.TextIOWrapper(io.BytesIO(original.read_bytes()), encoding="utf-8", newline=None)
+                    args = ["humanize", "rewrite", "--input", str(original) if source == "file" else "-", "--output", str(output)]
+                    with patch.dict(os.environ, {"QILING_API_KEY": KEY}, clear=True), patch.object(client.sys, "argv", args), patch.object(client.sys, "stdin", stdin), patch.object(client.sys, "stdout", io.StringIO()), patch.object(client, "build_opener") as opener:
+                        opener.return_value.open.side_effect = service
+                        self.assertEqual(client.main(), 0)
+                    stdin.close()
+                    self.assertEqual(sent, [text])
+                    self.assertEqual(output.read_bytes(), rewritten.encode("utf-8"))
+
+    def test_plan_counts_untrimmed_characters_and_real_newlines(self):
+        text = "\r\n第一段\r\n\r\n第二段\r\n"
+        stdout = io.StringIO()
+        with patch.object(client.sys, "argv", ["humanize", "plan", "--input", "-"]), patch.object(client.sys, "stdin", io.StringIO(text)), patch.object(client.sys, "stdout", stdout), patch.object(client, "request") as request:
+            self.assertEqual(client.main(), 0)
+            request.assert_not_called()
+        plan = json.loads(stdout.getvalue())
+        self.assertEqual(plan["characters"], len(text))
+        self.assertEqual(plan["line_breaks"], 4)
+        self.assertEqual(plan["part_line_breaks"], [4])
+
+    def test_long_article_posts_preserve_every_original_character(self):
+        text = "\n\n" + "甲" * 1200 + "\r\n\r\n" + "乙" * 1200 + "\n\n" + "丙" * 1100 + "\n\n"
+        submitted, returned = [], []
+
+        def service(method, path, key, payload=None):
+            if method == "POST":
+                submitted.append(payload["text"])
+                return {"task_id": str(len(submitted))}
+            result = "\r\n改文" + path.rsplit("/", 1)[-1] + "\r\n\r\n"
+            returned.append(result)
+            return {"status": "completed", "text": result}
+
+        with patch.object(client, "request", side_effect=service):
+            client.rewrite(text, self.output, self.state, KEY)
+        self.assertEqual("".join(submitted), text)
+        self.assertTrue(all(len(part) <= 2000 for part in submitted))
+        self.assertEqual(self.output.read_bytes().decode("utf-8"), "\n\n".join(returned))
+
+    def test_upgrade_resumes_legacy_chunk_boundaries_without_resubmitting(self):
+        text = "\n" + "甲" * 2000 + "乙\n"
+        client.write_json(self.state, {"base_url": client.BASE_URL, "input_sha256": client.hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                                     "output": str(self.output.resolve()), "parts": [{"status": "completed", "text": "\n第一段改文\n"}, {"status": "ready"}]})
+        with patch.object(client, "request", side_effect=[{"task_id": "last-task"}, {"status": "completed", "text": "第二段改文"}]) as request:
+            client.rewrite(text, self.output, self.state, KEY)
+        self.assertEqual([call.args[0] for call in request.call_args_list], ["POST", "GET"])
+        self.assertEqual(request.call_args_list[0].args[3], {"text": "乙"})
+        self.assertEqual(self.output.read_text(), "第一段改文\n\n第二段改文\n")
+
+    def test_whitespace_only_fragment_is_rejected_before_paid_submission(self):
+        with patch.object(client, "request") as request:
+            with self.assertRaises(client.ClientError):
+                client.rewrite("正文" + " " * 2200, self.output, self.state, KEY)
+            request.assert_not_called()
+
+    def test_upgrade_can_resume_legacy_file_with_normalized_windows_newlines(self):
+        text = "\r\n第一段\r\n\r\n第二段\r\n"
+        previously_read = text.replace("\r\n", "\n")
+        client.write_json(self.state, {"base_url": client.BASE_URL, "input_sha256": client.hashlib.sha256(previously_read.encode("utf-8")).hexdigest(),
+                                     "output": str(self.output.resolve()), "parts": [{"status": "queued", "task_id": "legacy-task"}]})
+        with patch.object(client, "request", return_value={"status": "completed", "text": "完成"}) as request:
+            client.rewrite(text, self.output, self.state, KEY)
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(request.call_args.args[0], "GET")
+
+    def test_trailing_newline_at_limit_stays_with_nonempty_text(self):
+        for newline in ("\n", "\r\n", "\r"):
+            with self.subTest(newline=repr(newline)):
+                text = "甲" * 2000 + newline
+                parts = client.split_text(text)
+                self.assertEqual("".join(parts), text)
+                self.assertTrue(all(part.strip() and len(part) <= 2000 for part in parts))
 
 
 if __name__ == "__main__":

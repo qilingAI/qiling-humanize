@@ -98,7 +98,9 @@ python3 scripts/humanize.py plan --input article.md
 python3 scripts/humanize.py rewrite --input article.md --output article.humanized.md
 ```
 
-`plan` 只计算字符和调用次数，不发请求。`rewrite` 保存任务 ID，查询原任务并交付服务成稿；实际扣费和余额来自接口响应。任务状态文件默认是 `article.humanized.md.qiling-state.json`，按私有文件保存且不会进入 Git。
+`plan` 只计算字符、换行和调用次数，不发请求。请保留原文真实换行和空行，避免先将段落拼成一行；如果原文有多行而计划的 `line_breaks` 为 0，应先恢复输入格式。脚本按原样读取正文并提交，长文分段也保留分段内的换行。
+
+`rewrite` 保存任务 ID，查询原任务并交付保留换行的服务成稿；实际扣费和余额来自接口响应。任务状态文件默认是 `article.humanized.md.qiling-state.json`，按私有文件保存且不会进入 Git。旧版本已提交任务仍按原分段恢复，避免重复计费。
 
 中断后重新执行同一条 `rewrite` 命令即可继续。若提交结果尚未明确，先在[用量页](https://toolsoul.daniu7.cn/account/api-usage)核对，按脚本提示关联原任务；确认没有创建任务后才重新提交。完整恢复说明见 [SKILL.md](SKILL.md)。
 
