@@ -1,6 +1,11 @@
 ---
 name: qiling-humanize
+version: "1.0.0"
+display_name: "文章去AI味 · 器灵"
+display_name_en: "Qiling Humanize"
 description: 调用器灵改文服务，为已有中文文章去 AI 味。当用户要求文章去 AI 味、降低文本 AI 特征或使用器灵改文时使用，支持粘贴正文和本地文本文件。
+description_zh: "调用器灵专业改文服务，为中文文章去 AI 味，保留原文段落与换行。支持浏览器一键授权、免费试用及本地文本文件改写。"
+description_en: "Humanize Chinese articles with the Qiling rewriting service while preserving paragraphs and line breaks. Supports browser authorization, a free trial, and local text files."
 ---
 
 # 文章去AI味 · 器灵

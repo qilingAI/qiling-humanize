@@ -55,6 +55,8 @@ npx skills add qilingAI/qiling-humanize --skill qiling-humanize
 
 技能文件使用标准 `SKILL.md`，调用脚本只依赖 Python 3 标准库。
 
+需要在平台上传压缩包时，包内应包含 `SKILL.md`、`scripts/`、`references/` 和 `agents/`。`SKILL.md` 开头提供版本号、中英文展示名称和描述，供平台解析；也保留通用的 `name` 和 `description`。
+
 ### 一键授权
 
 使用流程是 **打开器灵授权页并登录 → 明确确认授权 → 自动领取默认 API Key 并保存到本地 → 开始改文**。
